@@ -70,10 +70,12 @@ function getStyles(
     top: number,
     isDragging: boolean,
     partOfStyle: React.CSSProperties,
+    background: string,
 ): React.CSSProperties {
     const transform = `translate3d(${left}px, ${top}px, 0)`
 
     return {
+        background: background,
         position: "absolute",
         transform: isDragging ? transform : "initial",
         WebkitTransform: isDragging ? transform : "initial",
@@ -184,7 +186,7 @@ function EventMark(props: any) {
             className={classes.marker}
             ref={drag}
             onDragStart={(eventEl: any) => onDragStart(eventEl, calendarEvent)}
-            style={getStyles(left, position / 57 - 2, isDragging, partOfStyle)}
+            style={getStyles(left, position / 57 - 2, isDragging, partOfStyle, calendarEvent.background)}
             onClick={(eventEl: any) =>
                 viewEvent({
                     eventEl,
