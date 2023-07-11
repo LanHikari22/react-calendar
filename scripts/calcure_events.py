@@ -9,7 +9,7 @@ MARKERS_JSON_PATH = 'public/markers.json'
 
 class CalcureEvent:
     def __init__(self, _id: str, begin_dt: dtdt, interval: timedelta, end_dt: dtdt, 
-                 event_type: str, gcode: str, uuid: str, proj: str, desc: str,
+                 event_type: str, gcode: str, uuid: str, subtask_uuid: str, proj: str, desc: str,
                  repeat_count: int, repeat_state: str, priority: str):
         self._id = _id
         self.begin_dt = begin_dt
@@ -18,6 +18,7 @@ class CalcureEvent:
         self.event_type = event_type
         self.gcode = gcode
         self.uuid = uuid
+        self.subtask_uuid = subtask_uuid
         self.proj = proj
         self.desc = desc
         self.repeat_count = repeat_count
@@ -50,7 +51,15 @@ class CalcureEvent:
         gcode = desc_tokens[2]
         uuid = desc_tokens[3]
         proj = desc_tokens[4]
-        event_desc = ' '.join(desc_tokens[5:])
+
+        # if the event description starts with 8 characters followed by a . and numbers, this is a subtask uuid.
+        subtask_uuid = ''
+        event_desc = ''
+        if '.' in desc_tokens[5] and len(desc_tokens[5]) >= len('badfeed8.01') and desc_tokens[5][8] == '.':
+            subtask_uuid = desc_tokens[5]
+            event_desc = ' '.join(desc_tokens[6:])
+        else:
+            event_desc = ' '.join(desc_tokens[5:])
 
         # Parse the begin time, should just be from the begin_time_s and the csv year month day.
         strptime_datetime_format = '%Y-%m-%d %H:%M'
@@ -58,11 +67,15 @@ class CalcureEvent:
         interval = timedelta(hours=int(interval_time_s[:2]), minutes=int(interval_time_s[2:]))
         end_dt = begin_dt + interval
 
-        return CalcureEvent(_id, begin_dt, interval, end_dt, event_type, gcode, uuid, proj, event_desc, int(_repeat_count), _repeat_state, _priority)
+
+
+
+        return CalcureEvent(_id, begin_dt, interval, end_dt, event_type, gcode, uuid, subtask_uuid, proj, event_desc, int(_repeat_count), _repeat_state, _priority)
 
     def to_csv(self) -> str:
         # ['217', '2023', '7', '7', '1340:0021 EVNT DRV1 afd865ee drvlic Request Driving car on exam time', '1', 'once', 'unimportant']
-        desc = f'{self.begin_dt.hour:02d}{self.begin_dt.minute:02d}:{self.interval.seconds // 3600:02d}{(self.interval.seconds // 60) % 60:02d} {self.event_type} {self.gcode} {self.uuid} {self.proj} {self.desc}'
+        subtask_uuid = f'{self.subtask_uuid} ' if len(self.subtask_uuid) != 0 else ''
+        desc = f'{self.begin_dt.hour:02d}{self.begin_dt.minute:02d}:{self.interval.seconds // 3600:02d}{(self.interval.seconds // 60) % 60:02d} {self.event_type} {self.gcode} {self.uuid} {self.proj} {subtask_uuid}{self.desc}'
         return f'{self._id},{self.begin_dt.year},{self.begin_dt.month},{self.begin_dt.day},\"{desc}\",{str(self.repeat_count)},{self.repeat_state},{self.priority}'
 
 def ConvertCalcureEventsToMarkersJson():
@@ -81,13 +94,15 @@ def ConvertCalcureEventsToMarkersJson():
             if calcure_event.priority == 'important':
                 background = 'rgba(249,241,165,1)'
 
+            subtask_uuid_desc = f'subtask_uuid: {calcure_event.subtask_uuid}, ' if len(calcure_event.subtask_uuid) != 0 else ''
+
             schedule_event = {
                 "id": calcure_event._id,
                 #"title": f"{calcure_event.event_type} {calcure_event.gcode} {calcure_event.uuid} {calcure_event.proj} {calcure_event.desc}",
-                "title": f"{calcure_event.gcode} {calcure_event.proj} {calcure_event.desc}",
+                "title": f"{calcure_event.gcode} {calcure_event.desc}",
                 "begin": calcure_event.begin_dt.strftime('%Y/%m/%d %H:%M:%S'),
                 "end": calcure_event.end_dt.strftime('%Y/%m/%d %H:%M:%S'),
-                "description": f"event: {calcure_event.event_type}, uuid: {calcure_event.uuid}, interval: {calcure_event.interval.seconds // 3600:02d}:{(calcure_event.interval.seconds // 60) % 60:02d}",
+                "description": f"event: {calcure_event.event_type}, uuid: {calcure_event.uuid}, {subtask_uuid_desc}proj: {calcure_event.proj}, interval: {calcure_event.interval.seconds // 3600:02d}:{(calcure_event.interval.seconds // 60) % 60:02d}",
                 "background": background,
             }
             result['markers'].append(schedule_event)
@@ -118,4 +133,4 @@ def ExpandCalcureEventsToOrderedSequencialEvents(day: dtdt, begin: timedelta, fi
 
 if __name__ == '__main__':
     ConvertCalcureEventsToMarkersJson()
-    #  ExpandCalcureEventsToOrderedSequencialEvents(dtdt.strptime('2023-07-11', '%Y-%m-%d'), timedelta(hours=9, minutes=30), 240, 248)
+    ExpandCalcureEventsToOrderedSequencialEvents(dtdt.strptime('2023-07-11', '%Y-%m-%d'), timedelta(hours=13, minutes=0), 240, 245)
