@@ -60,7 +60,12 @@ class CalcureEvent:
 
         return CalcureEvent(_id, begin_dt, interval, end_dt, event_type, gcode, uuid, proj, event_desc, int(_repeat_count), _repeat_state, _priority)
 
-if __name__ == '__main__':
+    def to_csv(self) -> str:
+        # ['217', '2023', '7', '7', '1340:0021 EVNT DRV1 afd865ee drvlic Request Driving car on exam time', '1', 'once', 'unimportant']
+        desc = f'{self.begin_dt.hour:02d}{self.begin_dt.minute:02d}:{self.interval.seconds // 3600:02d}{(self.interval.seconds // 60) % 60:02d} {self.event_type} {self.gcode} {self.uuid} {self.proj} {self.desc}'
+        return f'{self._id},{self.begin_dt.year},{self.begin_dt.month},{self.begin_dt.day},\"{desc}\",{str(self.repeat_count)},{self.repeat_state},{self.priority}'
+
+def ConvertCalcureEventsToMarkersJson():
     result = {}
     result['markers'] = []
 
@@ -94,3 +99,23 @@ if __name__ == '__main__':
     
 # 1688965338515
 # {id:1688965338515,title:AAA,begin:2023/07/09 03:30:00,end:2023/07/09 04:30:00,description:"", background: rgba(256,0,0,1)},
+    pass
+
+def ExpandCalcureEventsToOrderedSequencialEvents(day: dtdt, begin: timedelta, first_id, last_id):
+    with open(CALCURE_EVENTS_CSV_PATH, 'r') as calcure_events_file:
+        csv_reader = csv.reader(calcure_events_file)
+        for row in csv_reader:
+            calcure_event = CalcureEvent.read_csv(row)
+            same_day = calcure_event.begin_dt.year == day.year and calcure_event.begin_dt.month == day.month and calcure_event.begin_dt.day == day.day
+            within_id_range = int(calcure_event._id) >= first_id and int(calcure_event._id) < last_id
+            if not same_day or not within_id_range:
+                continue
+            calcure_event.begin_dt += begin
+            begin += calcure_event.interval + timedelta(minutes=10)
+            print(calcure_event.to_csv())
+
+    pass
+
+if __name__ == '__main__':
+    ConvertCalcureEventsToMarkersJson()
+    #  ExpandCalcureEventsToOrderedSequencialEvents(dtdt.strptime('2023-07-11', '%Y-%m-%d'), timedelta(hours=9, minutes=30), 240, 248)
