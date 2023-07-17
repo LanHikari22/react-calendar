@@ -1,6 +1,8 @@
 import csv
 import json
-from typing import List
+import hashlib
+import time
+from typing import List, Any
 from datetime import datetime as dtdt
 from datetime import timedelta
 
@@ -99,10 +101,10 @@ def ConvertCalcureEventsToMarkersJson():
             schedule_event = {
                 "id": calcure_event._id,
                 #"title": f"{calcure_event.event_type} {calcure_event.gcode} {calcure_event.uuid} {calcure_event.proj} {calcure_event.desc}",
-                "title": f"{calcure_event.gcode} {calcure_event.desc}",
+                "title": f"{calcure_event.gcode} {calcure_event.proj} {calcure_event.desc}",
                 "begin": calcure_event.begin_dt.strftime('%Y/%m/%d %H:%M:%S'),
                 "end": calcure_event.end_dt.strftime('%Y/%m/%d %H:%M:%S'),
-                "description": f"event: {calcure_event.event_type}, uuid: {calcure_event.uuid}, {subtask_uuid_desc}proj: {calcure_event.proj}, interval: {calcure_event.interval.seconds // 3600:02d}:{(calcure_event.interval.seconds // 60) % 60:02d}",
+                "description": f"event: {calcure_event.event_type}, uuid: {calcure_event.uuid}, {subtask_uuid_desc} interval: {calcure_event.interval.seconds // 3600:02d}:{(calcure_event.interval.seconds // 60) % 60:02d}",
                 "background": background,
             }
             result['markers'].append(schedule_event)
@@ -110,27 +112,57 @@ def ConvertCalcureEventsToMarkersJson():
     
     with open(MARKERS_JSON_PATH, 'w') as json_file:
         json_file.write(json.dumps(result))
+    time.sleep(8)
+
+    # Due to React update bug, double-trigger changes so that the screen updates to the latest. This will be shortly reverted.
+    #  with open(MARKERS_JSON_PATH, 'w') as json_file:
+        #  json_file.write(json.dumps({"markers": [{"id":1688965338515,"title":"AAA","begin":"2023/07/09 03:30:00","end":"2023/07/09 04:30:00","description":"", "background": "rgba(256,0,0,1)"}]}))z
+
+    with open(MARKERS_JSON_PATH, 'w') as json_file:
+        json_file.write(json.dumps(result))
+
 
     
 # 1688965338515
 # {id:1688965338515,title:AAA,begin:2023/07/09 03:30:00,end:2023/07/09 04:30:00,description:"", background: rgba(256,0,0,1)},
     pass
 
-def ExpandCalcureEventsToOrderedSequencialEvents(day: dtdt, begin: timedelta, first_id, last_id):
+def WatchCalcureEventsAndUpdateMarkersJson():
+    def check_hash():
+        with open(CALCURE_EVENTS_CSV_PATH, 'rb') as file:
+            return hashlib.sha256(file.read()).hexdigest()
+
+    stored_hash = check_hash()
+
+    print(f'{dtdt.now()} Watching for changes in calcure events to update public/markers.json.\n\t{stored_hash[:6]}')
+
+    while True:
+        try:
+            new_hash = check_hash()
+            if new_hash != stored_hash:
+                print(f'{dtdt.now()} Detected calcure event change. Updating public/markers.json.\n\t{stored_hash[:6]} -> {new_hash[:6]}')
+                ConvertCalcureEventsToMarkersJson()
+                stored_hash = new_hash
+        except FileNotFoundError:
+            print(f'{dtdt.now()} Calcure events file deleted.')
+
+        time.sleep(1)
+
+
+def ExpandCalcureEventsToOrderedSequencialEvents(begin: timedelta, first_id, last_id):
     with open(CALCURE_EVENTS_CSV_PATH, 'r') as calcure_events_file:
         csv_reader = csv.reader(calcure_events_file)
         for row in csv_reader:
             calcure_event = CalcureEvent.read_csv(row)
-            same_day = calcure_event.begin_dt.year == day.year and calcure_event.begin_dt.month == day.month and calcure_event.begin_dt.day == day.day
+            #  same_day = calcure_event.begin_dt.year == day.year and calcure_event.begin_dt.month == day.month and calcure_event.begin_dt.day == day.day
             within_id_range = int(calcure_event._id) >= first_id and int(calcure_event._id) < last_id
-            if not same_day or not within_id_range:
+            if not within_id_range:
                 continue
             calcure_event.begin_dt += begin
             begin += calcure_event.interval + timedelta(minutes=10)
             print(calcure_event.to_csv())
 
-    pass
 
 if __name__ == '__main__':
-    ConvertCalcureEventsToMarkersJson()
-    ExpandCalcureEventsToOrderedSequencialEvents(dtdt.strptime('2023-07-11', '%Y-%m-%d'), timedelta(hours=13, minutes=0), 240, 245)
+    WatchCalcureEventsAndUpdateMarkersJson()
+    ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=12, minutes=40), 264, 271)

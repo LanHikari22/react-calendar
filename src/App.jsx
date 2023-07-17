@@ -11,7 +11,9 @@ const App = () => {
           const localStorageMarkers = localStorage.getItem('markers');
           if (localStorageMarkers !== JSON.stringify(newMarkers['markers'])) {
             localStorage.setItem('markers', JSON.stringify(newMarkers['markers']));
+            console.log('updating markers...', localStorage.getItem('markers').length, JSON.stringify(newMarkers['markers']).length);
             // Perform any additional actions here, such as updating state or triggering component re-renders
+            this.setState({});
           }
         })
         .catch(error => {
