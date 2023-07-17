@@ -1,3 +1,4 @@
+import sys
 import csv
 import json
 import hashlib
@@ -6,7 +7,8 @@ from typing import List, Any
 from datetime import datetime as dtdt
 from datetime import timedelta
 
-CALCURE_EVENTS_CSV_PATH = '/home/lan/.task/schedule/events.csv'
+# TODO: Update this path for the one on your system. (Need to be made externally configurable)
+CALCURE_EVENTS_CSV_PATH = '/root/.task/schedule/events.csv'
 MARKERS_JSON_PATH = 'public/markers.json'
 
 class CalcureEvent:
@@ -164,5 +166,15 @@ def ExpandCalcureEventsToOrderedSequencialEvents(begin: timedelta, first_id, las
 
 
 if __name__ == '__main__':
-    WatchCalcureEventsAndUpdateMarkersJson()
-    ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=12, minutes=40), 264, 271)
+    if len(sys.argv) < 2:
+        print ('usage: calcure_events {populate|watch|order}')
+        exit(0)
+
+    if sys.argv[1] == 'populate':
+        ConvertCalcureEventsToMarkersJson()
+    if sys.argv[1] == 'watch':
+        WatchCalcureEventsAndUpdateMarkersJson()
+    if sys.argv[1] == 'order':
+        hours, minutes = map(int, sys.argv[2].split(':'))
+        i, j = map(int, sys.argv[3].split(':'))
+        ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=hours, minutes=minutes), i, j)
