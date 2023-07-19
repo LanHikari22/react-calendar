@@ -147,6 +147,8 @@ def WatchCalcureEventsAndUpdateMarkersJson():
                 stored_hash = new_hash
         except FileNotFoundError:
             print(f'{dtdt.now()} Calcure events file deleted.')
+        except Exception as e:
+            print(f'{dtdt.now()} Calcure Watch Exception: {e}')
 
         time.sleep(1)
 
