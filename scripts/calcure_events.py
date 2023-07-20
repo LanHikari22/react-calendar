@@ -3,7 +3,7 @@ import csv
 import json
 import hashlib
 import time
-from typing import List, Any
+from typing import List, Any, Tuple, Optional
 from datetime import datetime as dtdt
 from datetime import timedelta
 
@@ -82,6 +82,75 @@ class CalcureEvent:
         desc = f'{self.begin_dt.hour:02d}{self.begin_dt.minute:02d}:{self.interval.seconds // 3600:02d}{(self.interval.seconds // 60) % 60:02d} {self.event_type} {self.gcode} {self.uuid} {self.proj} {subtask_uuid}{self.desc}'
         return f'{self._id},{self.begin_dt.year},{self.begin_dt.month},{self.begin_dt.day},\"{desc}\",{str(self.repeat_count)},{self.repeat_state},{self.priority}'
 
+
+class TimeSlots:
+    # Represent time slots on a 5-minute basis, 288 5-minutes in the day.
+    def __init__(self):
+        self.slots = [None] * 288  # Fill slots with None, representing no event
+
+    @staticmethod
+    def index(t: timedelta) -> int:
+        """
+        Given a time, gives the index of it in the timeslots. This would just be which multiple of 5 minutes it is.
+        """
+        return t.seconds // 60 // 5
+
+    @staticmethod
+    def time(i: index) -> timedelta:
+        return timedelta(minutes=i * 5)
+
+    def event(self, t: timedelta) -> Optional[Tuple[int, timedelta, timedelta]]:
+        """
+        Given a time, give the event_id, start time, and duration of an event allocated there.
+        """
+        idx = self.index(t)
+        event_id = self.slots[idx]
+
+        if event_id is not None:
+            # Find the start of the event
+            start_idx = idx
+            while start_idx > 0 and self.slots[start_idx - 1] == event_id:
+                start_idx -= 1
+
+            # Find the end of the event
+            end_idx = idx
+            while end_idx < len(self.slots) - 1 and self.slots[end_idx + 1] == event_id:
+                end_idx += 1
+
+            # Compute start time and duration
+            start_time = timedelta(minutes=start_idx * 5)
+            duration = timedelta(minutes=(end_idx - start_idx + 1) * 5)
+
+            return event_id, start_time, duration
+
+        else:
+            return None
+
+
+    def add_event(self, event_id: int, t: timedelta, duration: timedelta):
+        """
+        Adds an event at a given time for a certain duration.
+        Note that conflicts are allowed and this only overrides.
+        """
+        start_idx = self.index(t)
+        end_idx = self.index(t + duration)
+        for idx in range(start_idx, end_idx):
+            self.slots[idx] = event_id
+
+    def event_fits(self, t: timedelta, duration: timedelta) -> bool:
+        """
+        Checks whether an event can be added.
+        """
+        start_idx = self.index(t)
+        end_idx = self.index(t + duration)
+        if end_idx < start_idx:
+            return False
+        return all(slot is None for slot in self.slots[start_idx:end_idx])
+
+    def display(self):
+        for i, slot in enumerate(self.slots):
+            print(f'{i * 5 // 60:02d}:{(i * 5) % 60:02d} {i} {slot}')
+
 def ConvertCalcureEventsToMarkersJson():
     result = {}
     result['markers'] = []
@@ -152,7 +221,6 @@ def WatchCalcureEventsAndUpdateMarkersJson():
 
         time.sleep(1)
 
-
 def ExpandCalcureEventsToOrderedSequencialEvents(begin: timedelta, first_id, last_id):
     with open(CALCURE_EVENTS_CSV_PATH, 'r') as calcure_events_file:
         csv_reader = csv.reader(calcure_events_file)
@@ -166,17 +234,117 @@ def ExpandCalcureEventsToOrderedSequencialEvents(begin: timedelta, first_id, las
             begin += calcure_event.interval + timedelta(minutes=10)
             print(calcure_event.to_csv())
 
+def SortPriorityFloatingStartTimeEvents(day: dtdt, begin: timedelta, skip_missed: bool):
+    def PopulateCurrentFixedEvents(timeslots: TimeSlots, day: dtdt, skip_missed: bool) -> dict:
+        result = {
+            'floating_events': [],
+            'fixed_events': [],
+        }
+
+        with open(CALCURE_EVENTS_CSV_PATH, 'r') as calcure_events_file:
+            csv_reader = csv.reader(calcure_events_file)
+            for row in csv_reader:
+                calcure_event = CalcureEvent.read_csv(row)
+
+                # Make sure that we're not packing ourselves too much with 10 minute paddding
+                event_begin = timedelta(hours=calcure_event.begin_dt.hour, minutes=calcure_event.begin_dt.minute)
+                event_dur = calcure_event.interval + timedelta(minutes=10)
+                event_dur_minutes = event_dur.seconds // 60
+
+                # we're only concerned with mapping today
+                same_day = calcure_event.begin_dt.year == day.year and calcure_event.begin_dt.month == day.month \
+                           and calcure_event.begin_dt.day == day.day
+                if not same_day:
+                    continue
+
+                # check if the event is completed/ongoing or if it has an interval ending with 1 or 6 (non-floating signal)
+                fixed = calcure_event.priority == 'unimportant' or calcure_event.priority == 'important' or \
+                        event_dur_minutes % 10 == 1 or event_dur_minutes % 10 == 6
+
+                # Anything with a beginning before specified beginning will be skipped.
+                if skip_missed:
+                    fixed = fixed or event_begin.seconds != 0 and event_begin < begin
+
+                # Some are floating but we should not touch them. 00:01-00:04
+                ignored_floating = event_begin.seconds // 60 > 0 and event_begin.seconds // 60 < 5
+
+                if fixed or ignored_floating:
+                    timeslots.add_event(calcure_event._id, event_begin, event_dur)
+                    result['fixed_events'].append(calcure_event)
+                else:
+                    result['floating_events'].append(calcure_event)
+        return result
+
+    # if begin is 00:00, use current time
+    if (begin.seconds == 0):
+        begin = timedelta(hours=dtdt.now().hour, minutes=dtdt.now().minute)
+
+    #today = dtdt.now() - timedelta(hours=dtdt.now().hour, minutes=dtdt.now().minute, seconds=dtdt.now().second)
+
+    timeslots = TimeSlots()
+    events_dict = PopulateCurrentFixedEvents(timeslots, day, skip_missed)
+
+    #timeslots.display()
+
+    for calcure_event in events_dict['fixed_events']:
+        print(calcure_event.to_csv())
+    print('')
+
+    for calcure_event in events_dict['floating_events']:
+        event_begin = timedelta(hours=calcure_event.begin_dt.hour, minutes=calcure_event.begin_dt.minute)
+        event_dur = calcure_event.interval + timedelta(minutes=10) # +10 minutes for padding
+        event_dur_minutes = event_dur.seconds // 60
+
+        # Find where the event can fit next
+        begin_slot = timeslots.index(begin)
+        while begin_slot < len(timeslots.slots) - 1 and not timeslots.event_fits(timeslots.time(begin_slot), event_dur):
+            begin_slot += 1
+
+        calcure_event.begin_dt = day + timeslots.time(begin_slot)
+        begin = timeslots.time(begin_slot) + event_dur
+
+        #print(f'bs={begin_slot}, t={timeslots.time(begin_slot)}, begin={begin}, begin_seconds={begin.seconds}, >day?{begin.seconds >= 60*60*24}, dur={event_dur}, fits?{timeslots.event_fits(timeslots.time(begin_slot), event_dur)}')
+
+        if begin_slot >= len(timeslots.slots) - 1 or timeslots.index(begin) >= len(timeslots.slots) - 1 or \
+           begin.seconds == 0 and begin.days > 0:
+            print(f'error: Could not fit event into day\n\t{calcure_event.to_csv()}')
+            continue
+
+        #print(begin_slot, calcure_event.to_csv())
+        print(calcure_event.to_csv())
+
+
+def OpTimesAndDisplay(t1: timedelta, op: str, t2: timedelta):
+    if op == '-':
+        result = t1 - t2
+    elif op == '+':
+        result = t1 + t2
+    else:
+        raise Exception(f'unknown op {op}')
+
+    return f'{result.seconds // 3600:02d}:{(result.seconds // 60) % 60:02d}'
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print ('usage: calcure_events {populate|watch|order}')
+        print ('usage: calcure_events {populate|watch|old_order|sort_float|op}')
         exit(0)
 
     if sys.argv[1] == 'populate':
         ConvertCalcureEventsToMarkersJson()
     if sys.argv[1] == 'watch':
         WatchCalcureEventsAndUpdateMarkersJson()
-    if sys.argv[1] == 'order':
+    if sys.argv[1] == 'old_order':
         hours, minutes = map(int, sys.argv[2].split(':'))
         i, j = map(int, sys.argv[3].split(':'))
         ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=hours, minutes=minutes), i, j)
+    if sys.argv[1] == 'sort_float':
+        day = dtdt.strptime(sys.argv[2], '%Y-%m-%d')
+        hours, minutes = map(int, sys.argv[3].split(':'))
+        skip_missed = sys.argv[4] == 'skip_missed'
+        SortPriorityFloatingStartTimeEvents(day, timedelta(hours=hours, minutes=minutes), skip_missed)
+    if sys.argv[1] == 'op':
+        hours1, minutes1 = map(int, sys.argv[2].split(':'))
+        op = sys.argv[3]
+        hours2, minutes2 = map(int, sys.argv[4].split(':'))
+        print(OpTimesAndDisplay(timedelta(hours=hours1, minutes=minutes1), op,
+                                timedelta(hours=hours2, minutes=minutes2)))
