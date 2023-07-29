@@ -108,7 +108,8 @@ function CalendarBoard(props: any) {
         // console.log("dayEvents", dayEvents)
 
         // Group by N minutes instead of hour to avoid excessive vertical splits
-        const block = 30
+        // FIXME BUG (Visual): Although this would avoid excessive vertical splits, it introduces new visual artifact of the event height overlapping with others in the same hour.
+        const block = 60
         const computeBlockMult = (event: any) => {
           return Math.trunc((new Date(event.begin).getHours() * 60 + new Date(event.begin).getMinutes()) / block);
         }
