@@ -105,29 +105,35 @@ function CalendarBoard(props: any) {
         const dayEvents = monthEvents.filter(
             (event: any) => format(new Date(event.begin), "YYYYMMDD") === format(day, "YYYYMMDD"),
         )
-
         // console.log("dayEvents", dayEvents)
 
-        const dayHoursEvents = dayEvents
-            .map((event: any) => new Date(event.begin).getHours())
-            .sort((numberA: number, numberB: number) => numberA - numberB)
-        // console.log("dayHoursEvents", dayHoursEvents)
+        // Group by N minutes instead of hour to avoid excessive vertical splits
+        const block = 30
+        const computeBlockMult = (event: any) => {
+          return Math.trunc((new Date(event.begin).getHours() * 60 + new Date(event.begin).getMinutes()) / block);
+        }
+        // console.log("block", block)
 
-        const eventsByHour = dayHoursEvents.reduce((acc: any[], hour: number) => {
-            const len = dayHoursEvents.filter((eventHour: number) => eventHour === hour).length
-            !acc.some((accItem: any) => accItem.hour === hour) && acc.push({ hour, len })
+        const dayBlockEvents = dayEvents
+            .map((event: any) => (computeBlockMult(event)))
+            .sort((numberA: number, numberB: number) => numberA - numberB)
+        // console.log("dayBlockEvents", dayBlockEvents)
+
+        const eventsByBlock = dayBlockEvents.reduce((acc: any[], blockMult: number) => {
+            const len = dayBlockEvents.filter((eventBlockMult: number) => eventBlockMult === blockMult).length
+            !acc.some((accItem: any) => accItem.blockMult === blockMult) && acc.push({ blockMult, len })
             return acc
         }, [])
+        // console.log("eventsByBlock", eventsByBlock)
 
-        // console.log("eventsByHour", eventsByHour)
-
-        const markers = eventsByHour.map((evHour: any) => {
+        const markers = eventsByBlock.map((evBlock: any) => {
             return dayEvents
-                .filter((event: any) => new Date(event.begin).getHours() === evHour.hour)
+                .filter((event: any) => (computeBlockMult(event) === evBlock.blockMult))
                 .map((event: any, index: number) => (
-                    <EventMark key={`event-${event.id}`} calendarEvent={event} sq={index} len={evHour.len} />
+                    <EventMark key={`event-${event.id}`} calendarEvent={event} sq={index} len={evBlock.len} />
                 ))
         })
+
         return markers
     }
 

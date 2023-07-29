@@ -334,15 +334,24 @@ if __name__ == '__main__':
     if sys.argv[1] == 'watch':
         WatchCalcureEventsAndUpdateMarkersJson()
     if sys.argv[1] == 'old_order':
+        if len(sys.argv) != 4:
+            print('usage: calcure_event sort_order {HH:MM} {i:j}')
+            exit(0)
         hours, minutes = map(int, sys.argv[2].split(':'))
         i, j = map(int, sys.argv[3].split(':'))
         ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=hours, minutes=minutes), i, j)
     if sys.argv[1] == 'sort_float':
+        if len(sys.argv) != 5:
+            print('usage: calcure_event sort_float {YYYY-MM-DD} {HH:MM|00:00} {[no_]skip_missed}')
+            exit(0)
         day = dtdt.strptime(sys.argv[2], '%Y-%m-%d')
         hours, minutes = map(int, sys.argv[3].split(':'))
         skip_missed = sys.argv[4] == 'skip_missed'
         SortPriorityFloatingStartTimeEvents(day, timedelta(hours=hours, minutes=minutes), skip_missed)
     if sys.argv[1] == 'op':
+        if len(sys.argv) != 5:
+            print('usage: calcure_event op {HH:MM} {+|-} {HH:MM}')
+            exit(0)
         hours1, minutes1 = map(int, sys.argv[2].split(':'))
         op = sys.argv[3]
         hours2, minutes2 = map(int, sys.argv[4].split(':'))
