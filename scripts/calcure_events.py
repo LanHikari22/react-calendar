@@ -3,6 +3,9 @@ import csv
 import json
 import hashlib
 import time
+import os
+import pipe
+import pandas as pd
 from typing import List, Any, Tuple, Optional
 from datetime import datetime as dtdt
 from datetime import timedelta
@@ -59,7 +62,10 @@ class CalcureEvent:
         # if the event description starts with 8 characters followed by a . and numbers, this is a subtask uuid.
         subtask_uuid = ''
         event_desc = ''
-        if '.' in desc_tokens[5] and len(desc_tokens[5]) >= len('badfeed8.01') and desc_tokens[5][8] == '.':
+        is_subtask = '.' in desc_tokens[5] and len(desc_tokens[5]) >= len('badfeed8.01') and desc_tokens[5][8] == '.'
+        has_subtask = '.' not in desc_tokens[5] and len(desc_tokens[5]) == len('badfeed8') and \
+                      all(desc_tokens[5] | pipe.map(lambda c: c >= '0' and c <= 'f'))
+        if is_subtask or has_subtask:
             subtask_uuid = desc_tokens[5]
             event_desc = ' '.join(desc_tokens[6:])
         else:
@@ -150,6 +156,303 @@ class TimeSlots:
     def display(self):
         for i, slot in enumerate(self.slots):
             print(f'{i * 5 // 60:02d}:{(i * 5) % 60:02d} {i} {slot}')
+
+
+class TaskEventReporting:
+    @staticmethod
+    def visualize_treemap_tasks():
+        import plotly.express as px
+
+        cls = TaskEventReporting
+
+        events = cls.read_calcure_events()
+        df_tasks = cls.read_tasks_dataframe()
+        num_subtask_layers = 5
+
+        do_include_event_timestamps = True
+
+        # TODO: refactor and make these modular and not duplicated in two places. Also externally controlled
+
+        do_filter_week = False
+        filter_for_week_s = '230828-W30'
+        filter_for_week = cls.parse_weekdate(filter_for_week_s)
+        mult_week_filter = 6
+        if do_filter_week:
+            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
+                                                         e.begin_dt < filter_for_week + timedelta(days=mult_week_filter * 7)))
+
+        do_filter_day = True
+        filter_for_day_s = '230904-W36M'
+        filter_for_day = cls.parse_weekdate(filter_for_day_s)
+        mult_day_filter = 1
+        if do_filter_day:
+            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_day and
+                                                         e.begin_dt < filter_for_day + timedelta(days=mult_day_filter)))
+
+        do_filter_by_uuid = False
+        filter_by_uuid_s = '488bbbc8'
+        if do_filter_by_uuid:
+            events = list(events | pipe.filter(lambda e: e.uuid == filter_by_uuid_s or 
+                                               filter_by_uuid_s in e.subtask_uuid))
+
+        do_filter_by_pattern = False
+        filter_by_pattern_s = 'Free'
+        if do_filter_by_pattern:
+            events = list(events | pipe.filter(lambda e: filter_by_pattern_s in e.desc))
+
+        do_skip_gcodes = False
+        skip_gcodes = []
+
+        do_filter_gcodes = False
+        filter_gcodes = ['APL1']
+
+        do_cluster_by_week = False
+        do_cluster_by_day = True
+
+        priority = 'unimportant'
+        # priority = 'normal'
+
+        # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
+
+        # Let's create a dataframe with maximum N levels of task depth. The treemap path would
+        # look like: gcode - project - supertask - [(subtask or pd.NA) xN] - event - event duration - path
+
+        cols_viz = ['gcode', 'project', 'supertask', 'event']
+        for i in range(num_subtask_layers):
+            cols_viz.append(f'subtask{i}')
+        cols_viz.append('dur')
+        cols_viz.append('path')
+        cols_viz.append('week')
+        cols_viz.append('hour')
+        if do_cluster_by_week:
+            cols_viz.append('cur_week')
+        if do_cluster_by_day:
+            cols_viz.append('cur_day')
+
+        df_viz = pd.DataFrame(columns=cols_viz)
+
+        # go through all events, and figure out task structure along each event, keeping that event
+        # references last
+        for event in events:
+            def task_to_str(task: pd.Series) -> str:
+                desc = task["description"]
+
+                # remove any uuid
+                desc_tokens = desc.split(' ')
+                if len(desc_tokens[0]) == len('899e9e05') or '.' in desc_tokens[0]:
+                    desc = ' '.join(desc_tokens[1:])
+
+                return desc
+
+            def event_to_str(event: CalcureEvent) -> str:
+                desc = event.desc
+
+                if not do_include_event_timestamps:
+                    # remove any stats at the start of the event
+                    event_desc_tokens = event.desc.split(' ')
+                    if ')' in event_desc_tokens[0]:
+                        desc = ' '.join(event_desc_tokens[1:])
+                else:
+                    timestamp = ' '.join(event.to_csv().split(' ')[:1]).replace('"', '')
+                    timestamp = ','.join(timestamp.split(',')[1:])
+                    desc = timestamp + ' ' + desc
+
+                return desc
+
+            def get_task_with_text(s):
+                # FIXME should return multiple
+                mask = df_tasks['description'].str.contains(s)
+                return df_tasks[mask].iloc[0]
+
+            def get_task_with_uuid(uuid):
+                try:
+                    mask = df_tasks['uuid'].str.contains(uuid)
+                    return df_tasks[mask].iloc[0]
+                except Exception:
+                    print(f'error finding tssk with uuid {uuid}')
+                    raise
+
+
+            if event.priority != priority:
+                continue
+
+            if do_skip_gcodes:
+                if event.gcode in skip_gcodes:
+                    continue
+            
+            if do_filter_gcodes:
+                if event.gcode not in filter_gcodes:
+                    continue
+
+            if event.subtask_uuid != '':
+                subtask_uuid_tokens = event.subtask_uuid.split('.')
+                supertask_uuid = subtask_uuid_tokens[0]
+                subtask_counts = []
+                if len(subtask_uuid_tokens) > 1:
+                    subtask_counts = subtask_uuid_tokens[1:]
+
+                event_tasks = [get_task_with_text(f'{supertask_uuid} ')]
+
+                uuid = f'{supertask_uuid}'
+                for count in subtask_counts:
+                    uuid = f'{uuid}.{count}'
+                    event_tasks.append(get_task_with_text(f'{uuid} '))
+
+                dict_viz = {'gcode': event.gcode, 'project': event.proj, 'supertask': task_to_str(event_tasks[0]),
+                            'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
+                            'path': ['gcode', 'project', 'supertask']}
+
+                if len(event_tasks) > 1:
+                    for i, event_task in enumerate(event_tasks[1:]):
+                        subtask_col = f'subtask{i}'
+                        dict_viz[subtask_col] = task_to_str(event_tasks[i+1])
+                        dict_viz['path'].append(subtask_col)
+
+                    for i in range(len(event_tasks[1:]), num_subtask_layers):
+                        dict_viz[f'subtask{i}'] = " "
+
+            else:
+                task = get_task_with_uuid(event.uuid)
+                dict_viz = {'gcode': event.gcode, 'project': event.proj, 'supertask': task_to_str(task),
+                            'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
+                            'path': ['gcode', 'project', 'supertask']}
+
+                for i in range(num_subtask_layers):
+                    dict_viz[f'subtask{i}'] = " "
+
+            if do_cluster_by_week:
+                dict_viz['cur_week'] = ''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G-W%V')))[:-2]))
+            if do_cluster_by_day:
+                dict_viz['cur_day'] = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+            dict_viz['week'] =  (((event.begin_dt - dtdt(year=2023, month=1, day=1)).days / 7) + 1)
+            dict_viz['hour'] =  float(event.begin_dt.hour)
+
+
+            df_viz = pd.concat([df_viz, pd.DataFrame([dict_viz])], ignore_index=True)
+
+
+
+        path_cols = [col for col in cols_viz if df_viz[col].notna().any()]
+        print(path_cols)
+
+        df_viz['color'] = 'blue'
+
+        print(df_viz)
+        df_viz.to_csv('here.csv')
+        path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
+
+        if do_cluster_by_day:
+            path = ['cur_day'] + path
+        if do_cluster_by_week:
+            path = ['cur_week'] + path
+
+        title = f'Treemap of time spent on events and their task structure'
+
+        title += ' ('
+        if do_filter_day:
+            if mult_day_filter != 1:
+                title += f'filter_for_days + {mult_day_filter} days: {filter_for_day_s}, '
+            else:
+                title += f'filter_for_day: {filter_for_day_s}, '
+        if do_filter_week:
+            if mult_week_filter != 1:
+                title += f'filter_for_weeks + {mult_week_filter} weeks: {filter_for_week_s[0:4] + "-" + filter_for_week_s.split("-")[1]}, '
+            else:
+                title += f'filter_for_week: {filter_for_week_s[0:4] + "-" + filter_for_week_s.split("-")[1]}, '
+        if do_filter_by_uuid:
+                title += f'filter_by_uuid: {filter_by_uuid_s}, '
+        if do_filter_by_pattern:
+                title += f'filter_by_pattern: {filter_by_pattern_s}, '
+
+        title += f'priority: {priority.replace("unimportant", "done")}, '
+        title += ')'
+
+
+        fig = px.treemap(df_viz, path=path, 
+                         values='dur', color='hour', color_discrete_sequence=['blue'],
+                         title=title)
+
+        fig.update_traces(hovertemplate='%{label}<br>%{value} hours<extra></extra>')
+
+        fig.show()
+
+    @staticmethod
+    def read_calcure_events() -> List[CalcureEvent]:
+        CALCURE_EVENTS_CSV_PATH = 'events.csv'
+        result = []
+
+        with open(CALCURE_EVENTS_CSV_PATH, 'r') as calcure_events_file:
+            csv_reader = csv.reader(calcure_events_file)
+            for row in csv_reader:
+                result.append(CalcureEvent.read_csv(row))
+        
+        return result
+
+    @staticmethod
+    def read_tasks_dataframe() -> pd.DataFrame:
+        import random
+        rand = random.random()
+
+        # os.system('task export > {rand}.json')
+        # df = pd.read_json(f'/tmp/{rand}.json')
+
+        df = pd.read_json('tasks.json')
+
+        # print(df)
+        # print(df.shape)
+
+        # os.remove('/tmp/{rand}.json')
+
+        return df
+
+    def convert_to_long_daycode(s: str) -> str:
+        if s[-1] == 'M':
+            s = s[:-1] + 'Mon'
+        elif s[-1] == 'T':
+            s = s[:-1] + 'Tue'
+        elif s[-1] == 'W':
+            s = s[:-1] + 'Wed'
+        elif s[-1] == 'R':
+            s = s[:-1] + 'Thu'
+        elif s[-1] == 'F':
+            s = s[:-1] + 'Fri'
+        elif s[-1] == 'S':
+            s = s[:-1] + 'Sat'
+        elif s[-1] == 'U':
+            s = s[:-1] + 'Sun'
+        
+        return s
+
+    def convert_to_short_daycode(s: str) -> str:
+        if s.endswith('Mon'):
+            s = s[:-3] + 'M'
+        elif s.endswith('Tue'):
+            s = s[:-3] + 'T'
+        elif s.endswith('Wed'):
+            s = s[:-3] + 'W'
+        elif s.endswith('Wed'):
+            s = s[:-3] + 'W'
+        elif s.endswith('Thu'):
+            s = s[:-3] + 'R'
+        elif s.endswith('Fri'):
+            s = s[:-3] + 'F'
+        elif s.endswith('Sat'):
+            s = s[:-3] + 'S'
+        elif s.endswith('Sun'):
+            s = s[:-3] + 'U'
+        
+        return s
+
+    @staticmethod
+    def parse_weekdate(s: str) -> dtdt:
+        cls = TaskEventReporting
+        # 230828-W35M
+        if s[-1].isnumeric():
+            s = s + 'Mon'
+        else:
+            s = cls.convert_to_long_daycode(s)
+            
+        return dtdt.strptime('20' + s, '%G%m%d-W%V%a')
 
 def ConvertCalcureEventsToMarkersJson():
     result = {}
@@ -313,7 +616,6 @@ def SortPriorityFloatingStartTimeEvents(day: dtdt, begin: timedelta, skip_missed
         #print(begin_slot, calcure_event.to_csv())
         print(calcure_event.to_csv())
 
-
 def OpTimesAndDisplay(t1: timedelta, op: str, t2: timedelta):
     if op == '-':
         result = t1 - t2
@@ -324,9 +626,10 @@ def OpTimesAndDisplay(t1: timedelta, op: str, t2: timedelta):
 
     return f'{result.seconds // 3600:02d}:{(result.seconds // 60) % 60:02d}'
 
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print ('usage: calcure_events {populate|watch|old_order|sort_float|op}')
+        print ('usage: calcure_events {populate|watch|old_order|sort_float|op|visualize_tasks}')
         exit(0)
 
     if sys.argv[1] == 'populate':
@@ -357,3 +660,6 @@ if __name__ == '__main__':
         hours2, minutes2 = map(int, sys.argv[4].split(':'))
         print(OpTimesAndDisplay(timedelta(hours=hours1, minutes=minutes1), op,
                                 timedelta(hours=hours2, minutes=minutes2)))
+    if sys.argv[1] == 'visualize_tasks':
+        TaskEventReporting.visualize_treemap_tasks()
+        pass
