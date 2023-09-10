@@ -4,3 +4,6 @@ public/markers.json
 tasks.json
 events.csv
 here.csv
+
+*.swp
+*.swo

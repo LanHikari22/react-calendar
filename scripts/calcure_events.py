@@ -160,8 +160,9 @@ class TimeSlots:
 
 class TaskEventReporting:
     @staticmethod
-    def visualize_treemap_tasks():
+    def visualize_treemap_tasks(args):
         import plotly.express as px
+        import textwrap
 
         cls = TaskEventReporting
 
@@ -169,53 +170,28 @@ class TaskEventReporting:
         df_tasks = cls.read_tasks_dataframe()
         num_subtask_layers = 5
 
-        do_include_event_timestamps = True
-
-        # TODO: refactor and make these modular and not duplicated in two places. Also externally controlled
-
-        do_filter_week = False
-        filter_for_week_s = '230828-W30'
-        filter_for_week = cls.parse_weekdate(filter_for_week_s)
-        mult_week_filter = 6
-        if do_filter_week:
-            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
-                                                         e.begin_dt < filter_for_week + timedelta(days=mult_week_filter * 7)))
-
-        do_filter_day = True
-        filter_for_day_s = '230904-W36M'
-        filter_for_day = cls.parse_weekdate(filter_for_day_s)
-        mult_day_filter = 1
-        if do_filter_day:
-            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_day and
-                                                         e.begin_dt < filter_for_day + timedelta(days=mult_day_filter)))
-
-        do_filter_by_uuid = False
-        filter_by_uuid_s = '488bbbc8'
-        if do_filter_by_uuid:
-            events = list(events | pipe.filter(lambda e: e.uuid == filter_by_uuid_s or 
-                                               filter_by_uuid_s in e.subtask_uuid))
-
-        do_filter_by_pattern = False
-        filter_by_pattern_s = 'Free'
-        if do_filter_by_pattern:
-            events = list(events | pipe.filter(lambda e: filter_by_pattern_s in e.desc))
-
-        do_skip_gcodes = False
-        skip_gcodes = []
-
-        do_filter_gcodes = False
-        filter_gcodes = ['APL1']
-
-        do_cluster_by_week = False
-        do_cluster_by_day = True
-
-        priority = 'unimportant'
-        # priority = 'normal'
-
         # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
 
         # Let's create a dataframe with maximum N levels of task depth. The treemap path would
         # look like: gcode - project - supertask - [(subtask or pd.NA) xN] - event - event duration - path
+
+
+        if args.filter_week:
+            filter_for_week = cls.parse_weekdate(args.filter_week)
+            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
+                                                         e.begin_dt < filter_for_week + timedelta(days=args.mult_week * 7)))
+
+        if args.filter_day:
+            filter_for_day = cls.parse_weekdate(args.filter_day)
+            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_day and
+                                                         e.begin_dt < filter_for_day + timedelta(days=args.mult_day)))
+
+        if args.filter_uuid:
+            events = list(events | pipe.filter(lambda e: e.uuid == args.filter_uuid or 
+                                               args.filter_uuid in e.subtask_uuid))
+
+        if args.filter_pattern:
+            events = list(events | pipe.filter(lambda e: args.filter_pattern in e.desc))
 
         cols_viz = ['gcode', 'project', 'supertask', 'event']
         for i in range(num_subtask_layers):
@@ -224,9 +200,9 @@ class TaskEventReporting:
         cols_viz.append('path')
         cols_viz.append('week')
         cols_viz.append('hour')
-        if do_cluster_by_week:
+        if args.cluster_week:
             cols_viz.append('cur_week')
-        if do_cluster_by_day:
+        if args.cluster_day:
             cols_viz.append('cur_day')
 
         df_viz = pd.DataFrame(columns=cols_viz)
@@ -247,15 +223,22 @@ class TaskEventReporting:
             def event_to_str(event: CalcureEvent) -> str:
                 desc = event.desc
 
-                if not do_include_event_timestamps:
+                if args.no_event_timestamps:
                     # remove any stats at the start of the event
                     event_desc_tokens = event.desc.split(' ')
                     if ')' in event_desc_tokens[0]:
                         desc = ' '.join(event_desc_tokens[1:])
                 else:
+                    cur_day = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+                    cur_day = cur_day.split('-')[1]
                     timestamp = ' '.join(event.to_csv().split(' ')[:1]).replace('"', '')
                     timestamp = ','.join(timestamp.split(',')[1:])
-                    desc = timestamp + ' ' + desc
+
+                    timestamp_date = '/'.join(timestamp.split(',')[:-1])
+                    timestamp_interval = timestamp.split(',')[-1]
+
+                    # desc = cur_day + ' ' + timestamp + ' ' + desc
+                    desc = timestamp_interval + ' ' + desc + '<br>' + timestamp_date + ' ' + cur_day
 
                 return desc
 
@@ -273,15 +256,15 @@ class TaskEventReporting:
                     raise
 
 
-            if event.priority != priority:
+            if event.priority != args.priority:
                 continue
 
-            if do_skip_gcodes:
-                if event.gcode in skip_gcodes:
+            if args.skip_gcodes:
+                if event.gcode in args.skip_gcodes:
                     continue
             
-            if do_filter_gcodes:
-                if event.gcode not in filter_gcodes:
+            if args.filter_gcodes:
+                if event.gcode not in args.filter_gcodes:
                     continue
 
             if event.subtask_uuid != '':
@@ -310,6 +293,9 @@ class TaskEventReporting:
 
                     for i in range(len(event_tasks[1:]), num_subtask_layers):
                         dict_viz[f'subtask{i}'] = " "
+                else:
+                    for i in range(num_subtask_layers):
+                        dict_viz[f'subtask{i}'] = " "
 
             else:
                 task = get_task_with_uuid(event.uuid)
@@ -320,11 +306,12 @@ class TaskEventReporting:
                 for i in range(num_subtask_layers):
                     dict_viz[f'subtask{i}'] = " "
 
-            if do_cluster_by_week:
+            if args.cluster_week:
                 dict_viz['cur_week'] = ''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G-W%V')))[:-2]))
-            if do_cluster_by_day:
+            if args.cluster_day:
                 dict_viz['cur_day'] = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
             dict_viz['week'] =  (((event.begin_dt - dtdt(year=2023, month=1, day=1)).days / 7) + 1)
+            dict_viz['week'] = int(dict_viz['week'] * 1000) / 1000
             dict_viz['hour'] =  float(event.begin_dt.hour)
 
 
@@ -336,40 +323,47 @@ class TaskEventReporting:
         print(path_cols)
 
         df_viz['color'] = 'blue'
-
-        print(df_viz)
-        df_viz.to_csv('here.csv')
         path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
 
-        if do_cluster_by_day:
+        if args.cluster_day:
             path = ['cur_day'] + path
-        if do_cluster_by_week:
+        if args.cluster_week:
             path = ['cur_week'] + path
 
         title = f'Treemap of time spent on events and their task structure'
 
         title += ' ('
-        if do_filter_day:
-            if mult_day_filter != 1:
-                title += f'filter_for_days + {mult_day_filter} days: {filter_for_day_s}, '
-            else:
-                title += f'filter_for_day: {filter_for_day_s}, '
-        if do_filter_week:
-            if mult_week_filter != 1:
-                title += f'filter_for_weeks + {mult_week_filter} weeks: {filter_for_week_s[0:4] + "-" + filter_for_week_s.split("-")[1]}, '
-            else:
-                title += f'filter_for_week: {filter_for_week_s[0:4] + "-" + filter_for_week_s.split("-")[1]}, '
-        if do_filter_by_uuid:
-                title += f'filter_by_uuid: {filter_by_uuid_s}, '
-        if do_filter_by_pattern:
-                title += f'filter_by_pattern: {filter_by_pattern_s}, '
+        title += f'priority: {args.priority.replace("unimportant", "done")}, '
 
-        title += f'priority: {priority.replace("unimportant", "done")}, '
+        if args.filter_day:
+            if args.mult_day != 1:
+                title += f'filter_for_days + {args.mult_day} days: {args.filter_day}, '
+            else:
+                title += f'filter_for_day: {args.filter_day}, '
+        if args.filter_week:
+            if args.mult_week != 1:
+                title += f'filter_for_weeks + {args.mult_week} weeks: {args.filter_week[0:4] + "-" + args.filter_week.split("-")[1]}, '
+            else:
+                title += f'filter_for_week: {args.filter_week[0:4] + "-" + args.filter_week.split("-")[1]}, '
+        if args.filter_uuid:
+                title += f'filter_by_uuid: {args.filter_uuid}, '
+        if args.filter_pattern:
+                title += f'filter_by_pattern: {args.filter_pattern}, '
+        if args.no_event_timestamps:
+                title += f'no_event_timestamps, '
         title += ')'
+        title = textwrap.fill(title, width=120)
+        title = title.replace('\n', '<br>')
+        print(title)
 
+        # Skip 0-sized values. They can't be normalized.
+        df_viz = df_viz[df_viz['dur'] != 0]
+
+        print(df_viz)
+        df_viz.to_csv('here.csv')
 
         fig = px.treemap(df_viz, path=path, 
-                         values='dur', color='hour', color_discrete_sequence=['blue'],
+                         values='dur', color=args.treemap_color, color_discrete_sequence=['blue'],
                          title=title)
 
         fig.update_traces(hovertemplate='%{label}<br>%{value} hours<extra></extra>')
@@ -627,39 +621,81 @@ def OpTimesAndDisplay(t1: timedelta, op: str, t2: timedelta):
     return f'{result.seconds // 3600:02d}:{(result.seconds // 60) % 60:02d}'
 
 
-if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print ('usage: calcure_events {populate|watch|old_order|sort_float|op|visualize_tasks}')
-        exit(0)
-
-    if sys.argv[1] == 'populate':
+def main(args):
+    if args.subcommand == 'populate':
         ConvertCalcureEventsToMarkersJson()
-    if sys.argv[1] == 'watch':
+    if args.subcommand == 'watch':
         WatchCalcureEventsAndUpdateMarkersJson()
-    if sys.argv[1] == 'old_order':
-        if len(sys.argv) != 4:
-            print('usage: calcure_event sort_order {HH:MM} {i:j}')
-            exit(0)
-        hours, minutes = map(int, sys.argv[2].split(':'))
-        i, j = map(int, sys.argv[3].split(':'))
+    if args.subcommand == 'old_order':
+        hours, minutes = map(int, args.hhmm.split(':'))
+        i, j = map(int, args.ij.split(':'))
         ExpandCalcureEventsToOrderedSequencialEvents(timedelta(hours=hours, minutes=minutes), i, j)
-    if sys.argv[1] == 'sort_float':
-        if len(sys.argv) != 5:
-            print('usage: calcure_event sort_float {YYYY-MM-DD} {HH:MM|00:00} {[no_]skip_missed}')
-            exit(0)
-        day = dtdt.strptime(sys.argv[2], '%Y-%m-%d')
-        hours, minutes = map(int, sys.argv[3].split(':'))
-        skip_missed = sys.argv[4] == 'skip_missed'
+    if args.subcommand == 'sort_float':
+        day = dtdt.strptime(args.day, '%Y-%m-%d')
+        hours, minutes = map(int, args.hhmm.split(':'))
+        skip_missed = args.skip_missed
         SortPriorityFloatingStartTimeEvents(day, timedelta(hours=hours, minutes=minutes), skip_missed)
-    if sys.argv[1] == 'op':
-        if len(sys.argv) != 5:
-            print('usage: calcure_event op {HH:MM} {+|-} {HH:MM}')
-            exit(0)
-        hours1, minutes1 = map(int, sys.argv[2].split(':'))
-        op = sys.argv[3]
-        hours2, minutes2 = map(int, sys.argv[4].split(':'))
+    if args.subcommand == 'op':
+        hours1, minutes1 = map(int, args.hhmm1.split(':'))
+        op = args.op
+        hours2, minutes2 = map(int, args.hhmm2.split(':'))
         print(OpTimesAndDisplay(timedelta(hours=hours1, minutes=minutes1), op,
                                 timedelta(hours=hours2, minutes=minutes2)))
-    if sys.argv[1] == 'visualize_tasks':
-        TaskEventReporting.visualize_treemap_tasks()
-        pass
+    if args.subcommand == 'visualize_tasks':
+        TaskEventReporting.visualize_treemap_tasks(args)
+
+
+def parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Commands to control Calcure Schedule Gui and Visualizations")
+    subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Subcommands")
+
+    subparser = subparsers.add_parser("populate", 
+                                      help="Subcommand 1 description")
+
+    subparser = subparsers.add_parser("watch", 
+                                      help="Subcommand 1 description")
+
+    # subparser = subparsers.add_parser("old_order", 
+    #                                   help="Subcommand 1 description")
+    # subparser.add_argument("hhmm", type=str, help="HH:MM")
+    # subparser.add_argument("ij", type=str, help="%d:%d")
+    # subparser.add_argument("--skip_missed", type=bool, help="Skip times that have already been accounted for")
+
+    subparser = subparsers.add_parser("sort_float", 
+                                      help="Subcommand 1 description")
+    subparser.add_argument("day", type=str, help="Format of %Y-%m-%d")
+    subparser.add_argument("hhmm", type=str, help="HH:MM")
+    subparser.add_argument("--skip_missed", type=bool, help="Skip times that have already been accounted for")
+
+    subparser = subparsers.add_parser("op", 
+                                      help="Subcommand 1 description")
+    subparser.add_argument("hhmm1", type=str, help="HH:MM")
+    subparser.add_argument("op", type=str, help="operation")
+    subparser.add_argument("hhmm2", type=str, help="HH:MM")
+
+    subparser = subparsers.add_parser("visualize_tasks", 
+                                      help="Subcommand 1 description")
+    subparser.add_argument("--no-event-timestamps", action="store_true", help="Don't Include event timestamps")
+    subparser.add_argument("--filter-week", type=str, help="Week to filter for")
+    subparser.add_argument("--mult-week", type=int, default=1, help="Multiplier for week filter")
+    subparser.add_argument("--filter-day", type=str, help="Day to filter for. 23MMDD-WVV[MTWRSU]")
+    subparser.add_argument("--mult-day", type=int, default=1, help="Multiplier for day filter")
+    subparser.add_argument("--filter-uuid", type=str, help="UUID to filter by")
+    subparser.add_argument("--filter-pattern", type=str, help="Pattern to filter by")
+    subparser.add_argument("--skip-gcodes", type=str, nargs='+', help="Gcodes to skip")
+    subparser.add_argument("--filter-gcodes", type=str, nargs='+', help="Gcodes to filter by")
+    subparser.add_argument("--cluster-week", action="store_true", help="Cluster by week")
+    subparser.add_argument("--cluster-day", action="store_true", help="Cluster by day")
+    subparser.add_argument("--priority", type=str, choices=['unimportant', 'normal'], default='unimportant', help="Set priority")
+    subparser.add_argument("--treemap-color", type=str, choices=['week', 'hour'], default='week', help="Set treemap color")
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    return args
+
+
+if __name__ == "__main__":
+    main(parse_args())
