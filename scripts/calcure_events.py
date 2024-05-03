@@ -168,13 +168,85 @@ class TaskEventReporting:
 
         events = cls.read_calcure_events()
         df_tasks = cls.read_tasks_dataframe()
-        num_subtask_layers = 5
+        num_subtask_layers = 4
+
+        def task_to_str(task: pd.Series) -> str:
+            desc = task["description"]
+
+            # remove any uuid
+            desc_tokens = desc.split(' ')
+            if len(desc_tokens[0]) == len('899e9e05') or '.' in desc_tokens[0]:
+                desc = ' '.join(desc_tokens[1:])
+
+            return desc
+
+        def event_to_str(event: CalcureEvent) -> str:
+            desc = event.desc
+
+            if args.no_event_timestamps:
+                # remove any stats at the start of the event
+                event_desc_tokens = event.desc.split(' ')
+                if ')' in event_desc_tokens[0]:
+                    desc = ' '.join(event_desc_tokens[1:])
+            else:
+                cur_day = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+                cur_day = cur_day.split('-')[1]
+                timestamp = ' '.join(event.to_csv().split(' ')[:1]).replace('"', '')
+                timestamp = ','.join(timestamp.split(',')[1:])
+
+                timestamp_date = '/'.join(timestamp.split(',')[:-1])
+                timestamp_interval = timestamp.split(',')[-1]
+
+                # desc = cur_day + ' ' + timestamp + ' ' + desc
+                desc = timestamp_interval + ' ' + desc + '<br>' + timestamp_date + ' ' + cur_day
+
+            return desc
+
+        def get_task_with_text(s):
+            # FIXME should return multiple
+            try:
+                mask = df_tasks['description'].str.contains(s)
+                return df_tasks[mask].iloc[0]
+            except IndexError as e:
+                print(f'Could not find any task with text "{s}"')
+                raise
+
+        def get_task_with_uuid(uuid):
+            try:
+                mask = df_tasks['uuid'].str.contains(uuid)
+                return df_tasks[mask].iloc[0]
+            except Exception:
+                print(f'error finding task with uuid \"{uuid}\"')
+                raise
+
+        def get_parents_of_uuid(uuid):
+            try:
+                result = []
+                task = get_task_with_uuid(uuid)
+
+                childof = task['childof']
+                if type(childof) != str:
+                    # print(f'Warning: task {uuid} does not have str childof but instead uses ' + 
+                    #       f'{type(childof)}: {childof}')
+                    return []
+
+                tokens = list(reversed(list(childof.split(','))))
+                # print('childof', task['childof'])
+                # print('tokens', tokens)
+
+                for token in tokens:
+                    if token.strip() == '':
+                        continue
+                    result.append(token)
+                return result
+            except Exception:
+                print(f'error finding parents of uuid \"{uuid}\"')
+                raise
 
         # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
 
         # Let's create a dataframe with maximum N levels of task depth. The treemap path would
         # look like: gcode - project - supertask - [(subtask or pd.NA) xN] - event - event duration - path
-
 
         if args.filter_week:
             filter_for_week = cls.parse_weekdate(args.filter_week)
@@ -193,9 +265,10 @@ class TaskEventReporting:
         if args.filter_pattern:
             events = list(events | pipe.filter(lambda e: args.filter_pattern in e.desc))
 
-        cols_viz = ['gcode', 'project', 'supertask', 'event']
+        cols_viz = ['gcode', 'project', 'supertask']
         for i in range(num_subtask_layers):
             cols_viz.append(f'subtask{i}')
+        cols_viz.append('event')
         cols_viz.append('dur')
         cols_viz.append('path')
         cols_viz.append('week')
@@ -210,52 +283,6 @@ class TaskEventReporting:
         # go through all events, and figure out task structure along each event, keeping that event
         # references last
         for event in events:
-            def task_to_str(task: pd.Series) -> str:
-                desc = task["description"]
-
-                # remove any uuid
-                desc_tokens = desc.split(' ')
-                if len(desc_tokens[0]) == len('899e9e05') or '.' in desc_tokens[0]:
-                    desc = ' '.join(desc_tokens[1:])
-
-                return desc
-
-            def event_to_str(event: CalcureEvent) -> str:
-                desc = event.desc
-
-                if args.no_event_timestamps:
-                    # remove any stats at the start of the event
-                    event_desc_tokens = event.desc.split(' ')
-                    if ')' in event_desc_tokens[0]:
-                        desc = ' '.join(event_desc_tokens[1:])
-                else:
-                    cur_day = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
-                    cur_day = cur_day.split('-')[1]
-                    timestamp = ' '.join(event.to_csv().split(' ')[:1]).replace('"', '')
-                    timestamp = ','.join(timestamp.split(',')[1:])
-
-                    timestamp_date = '/'.join(timestamp.split(',')[:-1])
-                    timestamp_interval = timestamp.split(',')[-1]
-
-                    # desc = cur_day + ' ' + timestamp + ' ' + desc
-                    desc = timestamp_interval + ' ' + desc + '<br>' + timestamp_date + ' ' + cur_day
-
-                return desc
-
-            def get_task_with_text(s):
-                # FIXME should return multiple
-                mask = df_tasks['description'].str.contains(s)
-                return df_tasks[mask].iloc[0]
-
-            def get_task_with_uuid(uuid):
-                try:
-                    mask = df_tasks['uuid'].str.contains(uuid)
-                    return df_tasks[mask].iloc[0]
-                except Exception:
-                    print(f'error finding tssk with uuid {uuid}')
-                    raise
-
-
             if event.priority != args.priority:
                 continue
 
@@ -267,42 +294,55 @@ class TaskEventReporting:
                 if event.gcode not in args.filter_gcodes:
                     continue
 
-            if event.subtask_uuid != '':
-                subtask_uuid_tokens = event.subtask_uuid.split('.')
-                supertask_uuid = subtask_uuid_tokens[0]
-                subtask_counts = []
-                if len(subtask_uuid_tokens) > 1:
-                    subtask_counts = subtask_uuid_tokens[1:]
+            if event.subtask_uuid != '': # We're some subtask
+                # This event task has parents we need to account for
+                event_task_branch = [get_task_with_uuid(event.uuid)]
 
-                event_tasks = [get_task_with_text(f'{supertask_uuid} ')]
+                # Get our parent tasks
+                parent_uuids = get_parents_of_uuid(event.uuid)
 
-                uuid = f'{supertask_uuid}'
-                for count in subtask_counts:
-                    uuid = f'{uuid}.{count}'
-                    event_tasks.append(get_task_with_text(f'{uuid} '))
+                # Account for each parent leading up to root
+                for uuid in parent_uuids:
+                    # print(f'uuid: \"{uuid}\"')
+                    event_task_branch.append(get_task_with_uuid(uuid))
+                
+                # Ensure to trim the branch to num_subtask_layers, as we have a set limit.
+                if len(event_task_branch) > num_subtask_layers:
+                    event_task_branch = event_task_branch[:num_subtask_layers]
 
-                dict_viz = {'gcode': event.gcode, 'project': event.proj, 'supertask': task_to_str(event_tasks[0]),
+                # Reverse the branch to start from root, our supertask as it is called.
+                event_task_branch = list(reversed(event_task_branch))
+
+                dict_viz = {'gcode': event.gcode, 'project': event.proj, 
+                            'supertask': task_to_str(event_task_branch[0]),
                             'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
                             'path': ['gcode', 'project', 'supertask']}
+                
+                if len(event_task_branch) > 1: # We were able to find parents
 
-                if len(event_tasks) > 1:
-                    for i, event_task in enumerate(event_tasks[1:]):
+                    # Fill in the the subtasks in the branch. We counted root.
+                    for i, subtask in enumerate(event_task_branch[1:]):
                         subtask_col = f'subtask{i}'
-                        dict_viz[subtask_col] = task_to_str(event_tasks[i+1])
+                        dict_viz[subtask_col] = task_to_str(event_task_branch[i+1])
                         dict_viz['path'].append(subtask_col)
 
-                    for i in range(len(event_tasks[1:]), num_subtask_layers):
+                    # If any are remaining from our `num_subtask_layers` limit, fill with empties.
+                    for i in range(len(event_task_branch[1:]), num_subtask_layers):
                         dict_viz[f'subtask{i}'] = " "
-                else:
+                else: # For some reason, we expected parents but could not find any.
+                    # print(f'Warning: Task {event.uuid} expected to have parents but it does not.')
+
+                    # Fill in all subtask columns with empties.
                     for i in range(num_subtask_layers):
                         dict_viz[f'subtask{i}'] = " "
-
-            else:
+            else: # We're a root element, no subtasks.
                 task = get_task_with_uuid(event.uuid)
-                dict_viz = {'gcode': event.gcode, 'project': event.proj, 'supertask': task_to_str(task),
+                dict_viz = {'gcode': event.gcode, 'project': event.proj, 
+                            'supertask': task_to_str(task),
                             'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
                             'path': ['gcode', 'project', 'supertask']}
 
+                # Fill in all subtask columns with empties.
                 for i in range(num_subtask_layers):
                     dict_viz[f'subtask{i}'] = " "
 
@@ -310,20 +350,24 @@ class TaskEventReporting:
                 dict_viz['cur_week'] = ''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G-W%V')))[:-2]))
             if args.cluster_day:
                 dict_viz['cur_day'] = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+
             dict_viz['week'] =  (((event.begin_dt - dtdt(year=2023, month=1, day=1)).days / 7) + 1)
             dict_viz['week'] = int(dict_viz['week'] * 1000) / 1000
             dict_viz['hour'] =  float(event.begin_dt.hour)
 
-
             df_viz = pd.concat([df_viz, pd.DataFrame([dict_viz])], ignore_index=True)
-
 
 
         path_cols = [col for col in cols_viz if df_viz[col].notna().any()]
         print(path_cols)
 
         df_viz['color'] = 'blue'
-        path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
+
+        # path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
+        path = ['gcode', 'project', 'supertask']
+        for i in range(num_subtask_layers):
+            path.append(f'subtask{i}')
+        path.append('event')
 
         if args.cluster_day:
             path = ['cur_day'] + path
@@ -362,6 +406,8 @@ class TaskEventReporting:
         print(df_viz)
         df_viz.to_csv('here.csv')
 
+        # print('path', path)
+
         fig = px.treemap(df_viz, path=path, 
                          values='dur', color=args.treemap_color, color_discrete_sequence=['blue'],
                          title=title)
@@ -392,8 +438,8 @@ class TaskEventReporting:
 
         df = pd.read_json('tasks.json')
 
-        # print(df)
-        # print(df.shape)
+        print(df)
+        print(df.shape)
 
         # os.remove('/tmp/{rand}.json')
 
@@ -693,6 +739,7 @@ def parse_args():
 
     # Parse the arguments
     args = parser.parse_args()
+    print(args)
 
     return args
 
