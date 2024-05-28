@@ -159,37 +159,21 @@ class TimeSlots:
 
 
 class TaskEventReporting:
-    @staticmethod
-    def visualize_treemap_tasks(args):
-        import plotly.express as px
-        import textwrap
+    class TreemapTasksVisualizer:
+        def __init__(self, args):
+            self.args = args
 
-        cls = TaskEventReporting
-
-        events = cls.read_calcure_events()
-        df_tasks = cls.read_tasks_dataframe()
-        num_subtask_layers = 4
-
-        def task_to_str(task: pd.Series) -> str:
-            desc = task["description"]
-
-            # remove any uuid
-            desc_tokens = desc.split(' ')
-            if len(desc_tokens[0]) == len('899e9e05') or '.' in desc_tokens[0]:
-                desc = ' '.join(desc_tokens[1:])
-
-            return desc
-
-        def event_to_str(event: CalcureEvent) -> str:
+        def event_to_str(self, event: CalcureEvent) -> str:
             desc = event.desc
+            parent_cls = TaskEventReporting
 
-            if args.no_event_timestamps:
+            if self.args.no_event_timestamps:
                 # remove any stats at the start of the event
                 event_desc_tokens = event.desc.split(' ')
                 if ')' in event_desc_tokens[0]:
                     desc = ' '.join(event_desc_tokens[1:])
             else:
-                cur_day = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+                cur_day = parent_cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
                 cur_day = cur_day.split('-')[1]
                 timestamp = ' '.join(event.to_csv().split(' ')[:1]).replace('"', '')
                 timestamp = ','.join(timestamp.split(',')[1:])
@@ -202,7 +186,221 @@ class TaskEventReporting:
 
             return desc
 
-        def get_task_with_text(s):
+        def visualize(self):
+            import plotly.express as px
+            import textwrap
+
+            cls = TaskEventReporting.TreemapTasksVisualizer
+            parent_cls = TaskEventReporting
+
+            events = parent_cls.read_calcure_events()
+            df_tasks = parent_cls.read_tasks_dataframe()
+
+            using_variable_subtasks = True
+            num_subtask_layers = 4
+
+            # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
+
+            # Let's create a dataframe with maximum N levels of task depth. The treemap path would
+            # look like: gcode - project - supertask - [(subtask or pd.NA) xN] - event - event duration - path
+
+            if self.args.filter_week:
+                filter_for_week = parent_cls.parse_weekdate(self.args.filter_week)
+                events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
+                                                            e.begin_dt < filter_for_week + timedelta(days=self.args.mult_week * 7)))
+
+            if self.args.filter_day:
+                filter_for_day = parent_cls.parse_weekdate(self.args.filter_day)
+                events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_day and
+                                                            e.begin_dt < filter_for_day + timedelta(days=self.args.mult_day)))
+
+            if self.args.filter_uuid:
+                events = list(events | pipe.filter(lambda e: e.uuid == self.args.filter_uuid or 
+                                                self.args.filter_uuid in e.subtask_uuid))
+
+            if self.args.filter_pattern:
+                events = list(events | pipe.filter(lambda e: self.args.filter_pattern in e.desc))
+
+            cols_viz = ['gcode', 'project', 'supertask']
+            if not using_variable_subtasks:
+                for i in range(num_subtask_layers):
+                    cols_viz.append(f'subtask{i}')
+            cols_viz.append('event')
+            cols_viz.append('dur')
+            cols_viz.append('path')
+            cols_viz.append('week')
+            cols_viz.append('hour')
+            if self.args.cluster_week:
+                cols_viz.append('cur_week')
+            if self.args.cluster_day:
+                cols_viz.append('cur_day')
+
+            df_viz = pd.DataFrame(columns=cols_viz)
+
+            # go through all events, and figure out task structure along each event, keeping that event
+            # references last
+            for event in events:
+                if event.priority != self.args.priority:
+                    continue
+
+                if self.args.skip_gcodes:
+                    if event.gcode in self.args.skip_gcodes:
+                        continue
+                
+                if self.args.filter_gcodes:
+                    if event.gcode not in self.args.filter_gcodes:
+                        continue
+
+                if event.subtask_uuid != '': # We're some subtask
+                    # This event task has parents we need to account for
+                    event_task_branch = [cls.get_task_with_uuid(df_tasks, event.uuid)]
+
+                    # Get our parent tasks
+                    parent_uuids = cls.get_parents_of_uuid(df_tasks, event.uuid)
+
+                    # Account for each parent leading up to root
+                    for uuid in parent_uuids:
+                        # print(f'uuid: \"{uuid}\"')
+                        event_task_branch.append(cls.get_task_with_uuid(df_tasks, uuid))
+                    
+                    if not using_variable_subtasks:
+                        # Ensure to trim the branch to num_subtask_layers, as we have a set limit.
+                        if len(event_task_branch) > num_subtask_layers:
+                            event_task_branch = event_task_branch[:num_subtask_layers]
+
+                    # Reverse the branch to start from root, our supertask as it is called.
+                    event_task_branch = list(reversed(event_task_branch))
+
+                    dict_viz = {'gcode': event.gcode, 'project': event.proj, 
+                                'supertask': cls.task_to_str(event_task_branch[0]),
+                                'event': self.event_to_str(event), 'dur': event.interval.seconds / 3600, 
+                                'path': ['gcode', 'project', 'supertask']}
+                    
+                    if len(event_task_branch) > 1: # We were able to find parents
+
+                        # Fill in the the subtasks in the branch. We counted root.
+                        for i, subtask in enumerate(event_task_branch[1:]):
+                            subtask_col = f'subtask{i}'
+                            dict_viz[subtask_col] = cls.task_to_str(event_task_branch[i+1])
+                            dict_viz['path'].append(subtask_col)
+
+                        if not using_variable_subtasks:
+                            # If any are remaining from our `num_subtask_layers` limit, fill with empties.
+                            for i in range(len(event_task_branch[1:]), num_subtask_layers):
+                                dict_viz[f'subtask{i}'] = " "
+                    else: # For some reason, we expected parents but could not find any.
+                        # print(f'Warning: Task {event.uuid} expected to have parents but it does not.')
+
+                        if not using_variable_subtasks:
+                            # Fill in all subtask columns with empties.
+                            for i in range(num_subtask_layers):
+                                dict_viz[f'subtask{i}'] = " "
+                else: # We're a root element, no subtasks.
+                    task = cls.get_task_with_uuid(df_tasks, event.uuid)
+                    dict_viz = {'gcode': event.gcode, 'project': event.proj, 
+                                'supertask': cls.task_to_str(task),
+                                'event': self.event_to_str(event), 'dur': event.interval.seconds / 3600, 
+                                'path': ['gcode', 'project', 'supertask']}
+
+                    if not using_variable_subtasks:
+                        # Fill in all subtask columns with empties.
+                        for i in range(num_subtask_layers):
+                            dict_viz[f'subtask{i}'] = " "
+
+                if self.args.cluster_week:
+                    dict_viz['cur_week'] = ''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G-W%V')))[:-2]))
+                if self.args.cluster_day:
+                    dict_viz['cur_day'] = parent_cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
+
+                dict_viz['week'] =  (((event.begin_dt - dtdt(year=2023, month=1, day=1)).days / 7) + 1)
+                dict_viz['week'] = int(dict_viz['week'] * 1000) / 1000
+                dict_viz['hour'] =  float(event.begin_dt.hour)
+
+                df_viz = pd.concat([df_viz, pd.DataFrame([dict_viz])], ignore_index=True)
+
+
+            path_cols = [col for col in cols_viz if df_viz[col].notna().any()]
+            print(path_cols)
+
+            df_viz['color'] = 'blue'
+
+            # path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
+            path = ['gcode', 'project', 'supertask']
+            for i in range(num_subtask_layers):
+                path.append(f'subtask{i}')
+            path.append('event')
+
+            if self.args.cluster_day:
+                path = ['cur_day'] + path
+            if self.args.cluster_week:
+                path = ['cur_week'] + path
+
+            title = f'Treemap of time spent on events and their task structure'
+
+            title += ' ('
+            title += f'priority: {self.args.priority.replace("unimportant", "done")}, '
+
+            if self.args.filter_day:
+                if self.args.mult_day != 1:
+                    title += f'filter_for_days + {self.args.mult_day} days: {self.args.filter_day}, '
+                else:
+                    title += f'filter_for_day: {self.args.filter_day}, '
+            if self.args.filter_week:
+                if self.args.mult_week != 1:
+                    title += f'filter_for_weeks + {self.args.mult_week} weeks: {self.args.filter_week[0:4] + "-" + self.args.filter_week.split("-")[1]}, '
+                else:
+                    title += f'filter_for_week: {self.args.filter_week[0:4] + "-" + self.args.filter_week.split("-")[1]}, '
+            if self.args.filter_uuid:
+                    title += f'filter_by_uuid: {self.args.filter_uuid}, '
+            if self.args.filter_pattern:
+                    title += f'filter_by_pattern: {self.args.filter_pattern}, '
+            if self.args.no_event_timestamps:
+                    title += f'no_event_timestamps, '
+            title += ')'
+            title = textwrap.fill(title, width=120)
+            title = title.replace('\n', '<br>')
+            print(title)
+
+            # Skip 0-sized values. They can't be normalized.
+            df_viz = df_viz[df_viz['dur'] != 0]
+
+            if using_variable_subtasks:
+                # Let's reorder to make sure that subtaskN follow after supertask
+                df_viz = cls.reorder_variable_subtasks(df_viz)
+
+
+            print(df_viz)
+            df_viz.to_csv('here.csv')
+
+            if self.args.text_only:
+                df_text_only = self.compute_accumulated_duration(df_viz)
+                df_text_only.to_csv('df_text_only.csv')
+                cls.display_accumulated_duration_df(df_text_only)
+
+            # print('path', path)
+
+            if not self.args.text_only:
+                fig = px.treemap(df_viz, path=path, 
+                                values='dur', color=self.args.treemap_color, color_discrete_sequence=['blue'],
+                                title=title)
+
+                fig.update_traces(hovertemplate='%{label}<br>%{value} hours<extra></extra>')
+
+                fig.show()
+
+        @staticmethod
+        def task_to_str(task: pd.Series) -> str:
+            desc = task["description"]
+
+            # remove any uuid
+            desc_tokens = desc.split(' ')
+            if len(desc_tokens[0]) == len('899e9e05') or '.' in desc_tokens[0]:
+                desc = ' '.join(desc_tokens[1:])
+
+            return desc
+
+        @staticmethod
+        def get_task_with_text(df_tasks, s):
             # FIXME should return multiple
             try:
                 mask = df_tasks['description'].str.contains(s)
@@ -211,18 +409,21 @@ class TaskEventReporting:
                 print(f'Could not find any task with text "{s}"')
                 raise
 
-        def get_task_with_uuid(uuid):
+        @staticmethod
+        def get_task_with_uuid(df_tasks, uuid):
             try:
                 mask = df_tasks['uuid'].str.contains(uuid)
                 return df_tasks[mask].iloc[0]
             except Exception:
-                print(f'error finding task with uuid \"{uuid}\"')
-                raise
+                    print(f'error finding task with uuid \"{uuid}\"')
+                    raise
 
-        def get_parents_of_uuid(uuid):
+        @staticmethod
+        def get_parents_of_uuid(df_tasks, uuid):
             try:
+                cls = TaskEventReporting.TreemapTasksVisualizer
                 result = []
-                task = get_task_with_uuid(uuid)
+                task = cls.get_task_with_uuid(df_tasks, uuid)
 
                 childof = task['childof']
                 if type(childof) != str:
@@ -243,178 +444,117 @@ class TaskEventReporting:
                 print(f'error finding parents of uuid \"{uuid}\"')
                 raise
 
-        # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
+        @staticmethod
+        def reorder_variable_subtasks(df):
+            # Identify the position of the 'supertask' column
+            supertask_index = df.columns.get_loc('supertask')
 
-        # Let's create a dataframe with maximum N levels of task depth. The treemap path would
-        # look like: gcode - project - supertask - [(subtask or pd.NA) xN] - event - event duration - path
+            # Identify subtask columns
+            subtask_columns = [col for col in df.columns if col.startswith('subtask')]
 
-        if args.filter_week:
-            filter_for_week = cls.parse_weekdate(args.filter_week)
-            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
-                                                         e.begin_dt < filter_for_week + timedelta(days=args.mult_week * 7)))
+            # Create the new column order
+            new_columns_order = (
+                list(df.columns[:supertask_index + 1]) +  # Columns before and including 'supertask'
+                subtask_columns +                        # Subtask columns
+                [col for col in df.columns if col not in list(df.columns[:supertask_index + 1]) + subtask_columns]  # Other columns
+            )
 
-        if args.filter_day:
-            filter_for_day = cls.parse_weekdate(args.filter_day)
-            events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_day and
-                                                         e.begin_dt < filter_for_day + timedelta(days=args.mult_day)))
+            # Reorder the DataFrame
+            return df[new_columns_order]
 
-        if args.filter_uuid:
-            events = list(events | pipe.filter(lambda e: e.uuid == args.filter_uuid or 
-                                               args.filter_uuid in e.subtask_uuid))
+        def compute_accumulated_duration(self, df):
+            # Define the columns to consider
+            subtask_columns = [col for col in df.columns if col.startswith('subtask')]
+            task_columns = ['supertask'] + subtask_columns
 
-        if args.filter_pattern:
-            events = list(events | pipe.filter(lambda e: args.filter_pattern in e.desc))
+            # Fill NaN values with 'None' for uniformity
+            df[task_columns] = df[task_columns].fillna('None')
 
-        cols_viz = ['gcode', 'project', 'supertask']
-        for i in range(num_subtask_layers):
-            cols_viz.append(f'subtask{i}')
-        cols_viz.append('event')
-        cols_viz.append('dur')
-        cols_viz.append('path')
-        cols_viz.append('week')
-        cols_viz.append('hour')
-        if args.cluster_week:
-            cols_viz.append('cur_week')
-        if args.cluster_day:
-            cols_viz.append('cur_day')
+            # Function to accumulate durations
+            def accumulate_durations(row):
+                tasks = [row[col] for col in task_columns if row[col] != 'None']
+                duration = row['dur']
+                accumulated = []
+                for i in range(len(tasks)):
+                    accumulated.append((tuple(tasks[:i+1]), duration))
+                return accumulated
 
-        df_viz = pd.DataFrame(columns=cols_viz)
+            # Apply the function to each row and create a list of tuples
+            # .explode() here takes a df with a single column [(task_name, same_dur) ...] where 
+            # same_dur is the same for each tuple.
+            # .explode() then turns this into a df with a single column but multiple rows per tuple
+            # ((task_name ...), same_dur) such that [(Task1, 0.5), (Task2, 0.5)] turns into two rows
+            # (Task1, 0.5) and (Task1, Task2, 0.5)
 
-        # go through all events, and figure out task structure along each event, keeping that event
-        # references last
-        for event in events:
-            if event.priority != args.priority:
-                continue
+            # accumulated_data = df.apply(accumulate_durations, axis=1)
+            # accumulated_data.to_csv('accumulated_data.csv')
+            accumulated_data = df.apply(accumulate_durations, axis=1).explode()
+            # accumulated_data.to_csv('accumulated_data_exploded.csv')
 
-            if args.skip_gcodes:
-                if event.gcode in args.skip_gcodes:
-                    continue
+            # Create a new DataFrame from the accumulated data
+            accumulated_df = pd.DataFrame(accumulated_data.tolist(), columns=['task', 'duration'])
+
+            # Aggregate the durations based on the task hierarchy
+            result_df = accumulated_df.groupby('task', as_index=False).agg({'duration': 'sum'})
+
+            # Split the task tuple back into separate columns
+            task_df = pd.DataFrame(result_df['task'].tolist(), columns=['supertask'] + [f'subtask{i}' for i in range(len(task_columns) - 1)])
+            result_df = pd.concat([task_df, result_df['duration']], axis=1)
+
+            # Remove columns that are entirely NaN
+            result_df = result_df.dropna(axis=1, how='all')
+
+            return result_df
+
+        @staticmethod
+        def calc_accumulation_duration_df_task_branch_length(df: pd.DataFrame):
+            # Define the columns to consider
+            subtask_columns = [col for col in df.columns if col.startswith('subtask')]
+            task_columns = ['supertask'] + subtask_columns
+
+            # Calculate the branch length
+            df['branch_length'] = df[task_columns].notna().sum(axis=1)
             
-            if args.filter_gcodes:
-                if event.gcode not in args.filter_gcodes:
-                    continue
+            return df
 
-            if event.subtask_uuid != '': # We're some subtask
-                # This event task has parents we need to account for
-                event_task_branch = [get_task_with_uuid(event.uuid)]
+        @staticmethod
+        def display_accumulated_duration_df(df: pd.DataFrame):
+            cls = TaskEventReporting.TreemapTasksVisualizer
 
-                # Get our parent tasks
-                parent_uuids = get_parents_of_uuid(event.uuid)
+            # Define the columns to consider
+            subtask_columns = [col for col in df.columns if col.startswith('subtask')]
+            task_columns = ['supertask'] + subtask_columns
 
-                # Account for each parent leading up to root
-                for uuid in parent_uuids:
-                    # print(f'uuid: \"{uuid}\"')
-                    event_task_branch.append(get_task_with_uuid(uuid))
-                
-                # Ensure to trim the branch to num_subtask_layers, as we have a set limit.
-                if len(event_task_branch) > num_subtask_layers:
-                    event_task_branch = event_task_branch[:num_subtask_layers]
+            df = cls.calc_accumulation_duration_df_task_branch_length(df)
+            df.to_csv('df_test.csv')
 
-                # Reverse the branch to start from root, our supertask as it is called.
-                event_task_branch = list(reversed(event_task_branch))
+            path = 'time_report.txt'
+            prev_len = 0
 
-                dict_viz = {'gcode': event.gcode, 'project': event.proj, 
-                            'supertask': task_to_str(event_task_branch[0]),
-                            'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
-                            'path': ['gcode', 'project', 'supertask']}
-                
-                if len(event_task_branch) > 1: # We were able to find parents
+            with open(path, 'w') as f:
+                for _, row in df.iterrows():
+                    len = row['branch_length']
+                    num_spaces = 2 * len * ' '
+                    dur = round(row['duration'] * 100) / 100
 
-                    # Fill in the the subtasks in the branch. We counted root.
-                    for i, subtask in enumerate(event_task_branch[1:]):
-                        subtask_col = f'subtask{i}'
-                        dict_viz[subtask_col] = task_to_str(event_task_branch[i+1])
-                        dict_viz['path'].append(subtask_col)
+                    hh = f'{int(dur):02}'
+                    mm = f'{int(60 * (dur - int(dur))):02}'
 
-                    # If any are remaining from our `num_subtask_layers` limit, fill with empties.
-                    for i in range(len(event_task_branch[1:]), num_subtask_layers):
-                        dict_viz[f'subtask{i}'] = " "
-                else: # For some reason, we expected parents but could not find any.
-                    # print(f'Warning: Task {event.uuid} expected to have parents but it does not.')
+                    # just to add some spacing, it's the second-layer that tends to be most dense
+                    # in my experience.
+                    if prev_len != 1 and len == 2:
+                        f.write('\n')
 
-                    # Fill in all subtask columns with empties.
-                    for i in range(num_subtask_layers):
-                        dict_viz[f'subtask{i}'] = " "
-            else: # We're a root element, no subtasks.
-                task = get_task_with_uuid(event.uuid)
-                dict_viz = {'gcode': event.gcode, 'project': event.proj, 
-                            'supertask': task_to_str(task),
-                            'event': event_to_str(event), 'dur': event.interval.seconds / 3600, 
-                            'path': ['gcode', 'project', 'supertask']}
+                    if len == 1:
+                        last_task = row['supertask']
+                    else:
+                        last_task = row[f'subtask{len - 2}']
+                    f.write(f'{num_spaces}{hh}:{mm} {last_task}\n')
+                    prev_len = len
 
-                # Fill in all subtask columns with empties.
-                for i in range(num_subtask_layers):
-                    dict_viz[f'subtask{i}'] = " "
-
-            if args.cluster_week:
-                dict_viz['cur_week'] = ''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G-W%V')))[:-2]))
-            if args.cluster_day:
-                dict_viz['cur_day'] = cls.convert_to_short_daycode(''.join(reversed(''.join(reversed(event.begin_dt.strftime('%G%m%d-W%V%a')))[:-2])))
-
-            dict_viz['week'] =  (((event.begin_dt - dtdt(year=2023, month=1, day=1)).days / 7) + 1)
-            dict_viz['week'] = int(dict_viz['week'] * 1000) / 1000
-            dict_viz['hour'] =  float(event.begin_dt.hour)
-
-            df_viz = pd.concat([df_viz, pd.DataFrame([dict_viz])], ignore_index=True)
-
-
-        path_cols = [col for col in cols_viz if df_viz[col].notna().any()]
-        print(path_cols)
-
-        df_viz['color'] = 'blue'
-
-        # path = ['gcode', 'project', 'supertask', 'subtask0', 'event']
-        path = ['gcode', 'project', 'supertask']
-        for i in range(num_subtask_layers):
-            path.append(f'subtask{i}')
-        path.append('event')
-
-        if args.cluster_day:
-            path = ['cur_day'] + path
-        if args.cluster_week:
-            path = ['cur_week'] + path
-
-        title = f'Treemap of time spent on events and their task structure'
-
-        title += ' ('
-        title += f'priority: {args.priority.replace("unimportant", "done")}, '
-
-        if args.filter_day:
-            if args.mult_day != 1:
-                title += f'filter_for_days + {args.mult_day} days: {args.filter_day}, '
-            else:
-                title += f'filter_for_day: {args.filter_day}, '
-        if args.filter_week:
-            if args.mult_week != 1:
-                title += f'filter_for_weeks + {args.mult_week} weeks: {args.filter_week[0:4] + "-" + args.filter_week.split("-")[1]}, '
-            else:
-                title += f'filter_for_week: {args.filter_week[0:4] + "-" + args.filter_week.split("-")[1]}, '
-        if args.filter_uuid:
-                title += f'filter_by_uuid: {args.filter_uuid}, '
-        if args.filter_pattern:
-                title += f'filter_by_pattern: {args.filter_pattern}, '
-        if args.no_event_timestamps:
-                title += f'no_event_timestamps, '
-        title += ')'
-        title = textwrap.fill(title, width=120)
-        title = title.replace('\n', '<br>')
-        print(title)
-
-        # Skip 0-sized values. They can't be normalized.
-        df_viz = df_viz[df_viz['dur'] != 0]
-
-        print(df_viz)
-        df_viz.to_csv('here.csv')
-
-        # print('path', path)
-
-        fig = px.treemap(df_viz, path=path, 
-                         values='dur', color=args.treemap_color, color_discrete_sequence=['blue'],
-                         title=title)
-
-        fig.update_traces(hovertemplate='%{label}<br>%{value} hours<extra></extra>')
-
-        fig.show()
+            
+            print(f'Wrote report to {path}')
+            
 
     @staticmethod
     def read_calcure_events() -> List[CalcureEvent]:
@@ -688,7 +828,7 @@ def main(args):
         print(OpTimesAndDisplay(timedelta(hours=hours1, minutes=minutes1), op,
                                 timedelta(hours=hours2, minutes=minutes2)))
     if args.subcommand == 'visualize_tasks':
-        TaskEventReporting.visualize_treemap_tasks(args)
+        TaskEventReporting.TreemapTasksVisualizer(args).visualize()
 
 
 def parse_args():
@@ -722,7 +862,7 @@ def parse_args():
     subparser.add_argument("hhmm2", type=str, help="HH:MM")
 
     subparser = subparsers.add_parser("visualize_tasks", 
-                                      help="Subcommand 1 description")
+                                      help="Visualize time taken to execute tasks")
     subparser.add_argument("--no-event-timestamps", action="store_true", help="Don't Include event timestamps")
     subparser.add_argument("--filter-week", type=str, help="Week to filter for")
     subparser.add_argument("--mult-week", type=int, default=1, help="Multiplier for week filter")
@@ -734,6 +874,7 @@ def parse_args():
     subparser.add_argument("--filter-gcodes", type=str, nargs='+', help="Gcodes to filter by")
     subparser.add_argument("--cluster-week", action="store_true", help="Cluster by week")
     subparser.add_argument("--cluster-day", action="store_true", help="Cluster by day")
+    subparser.add_argument("--text-only", action="store_true", help="This instead reports a textual summary")
     subparser.add_argument("--priority", type=str, choices=['unimportant', 'normal'], default='unimportant', help="Set priority")
     subparser.add_argument("--treemap-color", type=str, choices=['week', 'hour'], default='week', help="Set treemap color")
 
