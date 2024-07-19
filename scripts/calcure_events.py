@@ -196,7 +196,7 @@ class TaskEventReporting:
             events = parent_cls.read_calcure_events()
             df_tasks = parent_cls.read_tasks_dataframe()
 
-            using_variable_subtasks = True
+            using_variable_subtasks = self.args.text_only
             num_subtask_layers = 4
 
             # list(events | pipe.map(lambda e: e.to_csv()) | pipe.map(lambda e: print(e)))
@@ -207,7 +207,14 @@ class TaskEventReporting:
             if self.args.filter_week:
                 filter_for_week = parent_cls.parse_weekdate(self.args.filter_week)
                 events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week and
-                                                            e.begin_dt < filter_for_week + timedelta(days=self.args.mult_week * 7)))
+                                                             e.begin_dt < filter_for_week + timedelta(days=self.args.mult_week * 7)))
+            if self.args.filter_week_before:
+                filter_for_week = parent_cls.parse_weekdate(self.args.filter_week_before)
+                events = list(events | pipe.filter(lambda e: e.begin_dt < filter_for_week))
+
+            if self.args.filter_week_from:
+                filter_for_week = parent_cls.parse_weekdate(self.args.filter_week_from)
+                events = list(events | pipe.filter(lambda e: e.begin_dt >= filter_for_week))
 
             if self.args.filter_day:
                 filter_for_day = parent_cls.parse_weekdate(self.args.filter_day)
@@ -375,7 +382,7 @@ class TaskEventReporting:
             if self.args.text_only:
                 df_text_only = self.compute_accumulated_duration(df_viz)
                 df_text_only.to_csv('df_text_only.csv')
-                cls.display_accumulated_duration_df(df_text_only)
+                self.display_accumulated_duration_df(df_text_only)
 
             # print('path', path)
 
@@ -463,16 +470,33 @@ class TaskEventReporting:
             return df[new_columns_order]
 
         def compute_accumulated_duration(self, df):
+            # we should always have root.
+            df['root'] = 'All'
+
+            cluster1 = None
+            cluster2 = None
+            if self.args.cluster_week:
+                cluster1 = 'cur_week'
+                if self.args.cluster_day:
+                    cluster2 = 'cur_day'
+            elif self.args.cluster_day:
+                cluster1 = 'cur_day'
+
             # Define the columns to consider
             subtask_columns = [col for col in df.columns if col.startswith('subtask')]
-            task_columns = ['supertask'] + subtask_columns
+            agg_columns = ['supertask'] + subtask_columns
+            if cluster2:
+                agg_columns = [cluster2] + agg_columns
+            if cluster1:
+                agg_columns = [cluster1] + agg_columns
+            agg_columns = ['root'] + agg_columns
 
             # Fill NaN values with 'None' for uniformity
-            df[task_columns] = df[task_columns].fillna('None')
+            df[agg_columns] = df[agg_columns].fillna('None')
 
             # Function to accumulate durations
             def accumulate_durations(row):
-                tasks = [row[col] for col in task_columns if row[col] != 'None']
+                tasks = [row[col] for col in agg_columns if row[col] != 'None']
                 duration = row['dur']
                 accumulated = []
                 for i in range(len(tasks)):
@@ -493,12 +517,19 @@ class TaskEventReporting:
 
             # Create a new DataFrame from the accumulated data
             accumulated_df = pd.DataFrame(accumulated_data.tolist(), columns=['task', 'duration'])
+            accumulated_df.to_csv('accumulated_df.csv')
 
             # Aggregate the durations based on the task hierarchy
             result_df = accumulated_df.groupby('task', as_index=False).agg({'duration': 'sum'})
 
             # Split the task tuple back into separate columns
-            task_df = pd.DataFrame(result_df['task'].tolist(), columns=['supertask'] + [f'subtask{i}' for i in range(len(task_columns) - 1)])
+            if cluster1 is not None and cluster2 is None:
+                columns = ['root', cluster1, 'supertask'] + [f'subtask{i}' for i in range(len(agg_columns) - 3)]
+            elif cluster1 is not None and cluster2 is not None:
+                columns = ['root', cluster1, cluster2, 'supertask'] + [f'subtask{i}' for i in range(len(agg_columns) - 4)]
+            else:
+                columns = ['root', 'supertask'] + [f'subtask{i}' for i in range(len(agg_columns) - 2)]
+            task_df = pd.DataFrame(result_df['task'].tolist(), columns=columns)
             result_df = pd.concat([task_df, result_df['duration']], axis=1)
 
             # Remove columns that are entirely NaN
@@ -506,27 +537,35 @@ class TaskEventReporting:
 
             return result_df
 
-        @staticmethod
-        def calc_accumulation_duration_df_task_branch_length(df: pd.DataFrame):
+        def calc_accumulation_duration_df_task_branch_length(self, df: pd.DataFrame, cluster1, cluster2):
             # Define the columns to consider
             subtask_columns = [col for col in df.columns if col.startswith('subtask')]
             task_columns = ['supertask'] + subtask_columns
+            if cluster2:
+                task_columns = [cluster2] + task_columns
+            if cluster1:
+                task_columns = [cluster1] + task_columns
+            task_columns = ['root'] + task_columns
 
             # Calculate the branch length
             df['branch_length'] = df[task_columns].notna().sum(axis=1)
             
             return df
 
-        @staticmethod
-        def display_accumulated_duration_df(df: pd.DataFrame):
+        def display_accumulated_duration_df(self, df: pd.DataFrame):
             cls = TaskEventReporting.TreemapTasksVisualizer
 
-            # Define the columns to consider
-            subtask_columns = [col for col in df.columns if col.startswith('subtask')]
-            task_columns = ['supertask'] + subtask_columns
+            cluster1 = None
+            cluster2 = None
+            if self.args.cluster_week:
+                cluster1 = 'cur_week'
+                if self.args.cluster_day:
+                    cluster2 = 'cur_day'
+            elif self.args.cluster_day:
+                cluster1 = 'cur_day'
 
-            df = cls.calc_accumulation_duration_df_task_branch_length(df)
-            df.to_csv('df_test.csv')
+            df = self.calc_accumulation_duration_df_task_branch_length(df, cluster1, cluster2)
+            # df.to_csv('df_test.csv')
 
             path = 'time_report.txt'
             prev_len = 0
@@ -534,21 +573,49 @@ class TaskEventReporting:
             with open(path, 'w') as f:
                 for _, row in df.iterrows():
                     len = row['branch_length']
+
                     num_spaces = 2 * len * ' '
                     dur = round(row['duration'] * 100) / 100
 
                     hh = f'{int(dur):02}'
                     mm = f'{int(60 * (dur - int(dur))):02}'
 
-                    # just to add some spacing, it's the second-layer that tends to be most dense
-                    # in my experience.
-                    if prev_len != 1 and len == 2:
-                        f.write('\n')
+                    if not cluster1 and not cluster2:
+                        # just to add some spacing, it's the second-layer that tends to be most dense
+                        # in my experience. (discounting root)
+                        if prev_len != 2 and len == 3:
+                            f.write('\n')
 
-                    if len == 1:
-                        last_task = row['supertask']
-                    else:
-                        last_task = row[f'subtask{len - 2}']
+                        if len == 1:
+                            last_task = row['root']
+                        elif len == 2:
+                            last_task = row['supertask']
+                        else:
+                            last_task = row[f'subtask{len - 3}'] # -3 because len-1 represents the NUMBER of subtasks, besides root/supertask
+                    elif cluster1 and not cluster2:
+                        if prev_len != 2 and len == 3:  # TODO Added spacing for supertasks
+                            f.write('\n')
+
+                        if len == 1:
+                            last_task = row['root']
+                        elif len == 2:
+                            last_task = row[cluster1]
+                        elif len == 3:
+                            last_task = row['supertask']
+                        else:
+                            last_task = row[f'subtask{len - 4}']
+                    elif cluster1 and cluster2:
+                        if len == 1:
+                            last_task = row['root']
+                        elif len == 2:
+                            last_task = row[cluster1]
+                        elif len == 3:
+                            last_task = row[cluster2]
+                        elif len == 4:
+                            last_task = row['supertask']
+                        else:
+                            last_task = row[f'subtask{len - 5}']
+
                     f.write(f'{num_spaces}{hh}:{mm} {last_task}\n')
                     prev_len = len
 
@@ -865,6 +932,8 @@ def parse_args():
                                       help="Visualize time taken to execute tasks")
     subparser.add_argument("--no-event-timestamps", action="store_true", help="Don't Include event timestamps")
     subparser.add_argument("--filter-week", type=str, help="Week to filter for")
+    subparser.add_argument("--filter-week-before", type=str, help="Week to filter for")
+    subparser.add_argument("--filter-week-from", type=str, help="Week to filter for")
     subparser.add_argument("--mult-week", type=int, default=1, help="Multiplier for week filter")
     subparser.add_argument("--filter-day", type=str, help="Day to filter for. 23MMDD-WVV[MTWRSU]")
     subparser.add_argument("--mult-day", type=int, default=1, help="Multiplier for day filter")
